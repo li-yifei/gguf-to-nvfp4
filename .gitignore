@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+*.gguf
+*.safetensors
+.hf_cache/

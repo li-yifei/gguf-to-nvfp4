@@ -1,0 +1,9 @@
+torch
+transformers>=5.0
+safetensors
+gguf
+numpy
+huggingface-hub
+llmcompressor
+datasets
+compressed-tensors
