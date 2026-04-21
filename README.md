@@ -1,9 +1,10 @@
-# GGUF to NVFP4: Qwen3.5-27B and Gemma 4 E4B from GGUF
+# GGUF to NVFP4: Qwen3.5, Qwen3.6 MoE, and Gemma 4 E4B from GGUF
 
 A pipeline for converting GGUF models whose architecture `transformers` does not yet support loading from GGUF directly, into NVIDIA FP4 (NVFP4) quantized HuggingFace safetensors format ready for vLLM serving.
 
 Currently supports:
 - **Qwen3.5-27B** (hybrid Gated-DeltaNet, text + vision) -- the original motivation
+- **Qwen3.6-35B-A3B** (MoE + hybrid Gated-DeltaNet, text + vision + MTP) -- see [Qwen3.6 MoE Variant](#qwen36-moe-variant)
 - **Gemma 4 E4B** (standard GQA + PLE, text + vision + audio) -- see [Gemma 4 E4B Variant](#gemma-4-e4b-variant)
 
 **[Chinese version / 中文版](README.cn.md)**
@@ -200,6 +201,155 @@ Linear attention layers use:
 
 Use `gpu_memory_utilization=0.90` and `kv_cache_dtype=fp8` for comfortable operation.
 
+## Qwen3.6 MoE Variant
+
+A separate entry-point supports **Qwen3.6-35B-A3B** (and variants like HauhauCS uncensored). This is a Mixture-of-Experts model with the same hybrid Gated-DeltaNet attention as Qwen3.5, but fundamentally different in FFN structure.
+
+### Architecture Differences from Qwen3.5
+
+| | Qwen3.5-27B | Qwen3.6-35B-A3B |
+|---|---|---|
+| Type | Dense | MoE (256 experts, 8 routed + 1 shared) |
+| Layers | 64 | 40 |
+| Hidden size | 5120 | 2048 |
+| Head dim (full attn) | 128 | 256 |
+| V heads (linear attn) | 48 = 3×16 | 32 = 2×16 |
+| Full attn Q dim | 4096 | 8192 (includes output gate) |
+| QKV split (linear) | Q:2048+K:2048+V:6144=10240 | Q:2048+K:2048+V:4096=8192 |
+| MTP head | No | Yes (1 layer, for speculative decoding) |
+| HF architecture | `Qwen3_5ForConditionalGeneration` | `Qwen3_5MoeForConditionalGeneration` |
+
+### MoE-Specific Conversion
+
+GGUF stores MoE expert weights as packed 3D tensors. HF expects a fused `gate_up_proj`:
+
+```python
+# GGUF: ffn_gate_exps [256, 512, 2048] + ffn_up_exps [256, 512, 2048]
+# HF:   experts.gate_up_proj [256, 1024, 2048]  (no .weight suffix!)
+fused = torch.cat([gate_exps, up_exps], dim=1)
+```
+
+Other MoE tensors:
+- `ffn_down_exps` → `experts.down_proj` (no `.weight` suffix)
+- `ffn_gate_inp` → `mlp.gate.weight` (router)
+- `ffn_gate_shexp` / `ffn_up_shexp` / `ffn_down_shexp` → `shared_expert.{gate,up,down}_proj.weight`
+- `ffn_gate_inp_shexp` → `shared_expert_gate.weight` (**needs unsqueeze(0)**: GGUF [2048] → HF [1, 2048])
+
+### Additional Conversion Pitfalls
+
+Beyond the 5 Qwen3.5 pitfalls (which all still apply), Qwen3.6 adds:
+
+6. **V-head permutation is (2,16) not (3,16).** 32 V-heads = 16 KV-groups × 2 heads. Same reshape/permute logic, different constants.
+
+7. **Patch embed is 5D.** Vision encoder uses temporal 3D conv. GGUF splits into `v.patch_embd.weight` + `v.patch_embd.weight.1` (two 4D tensors), which must be stacked into one 5D tensor `[C, 3, 2, H, W]`.
+
+8. **MTP not in GGUF.** Multi-Token Prediction head (19 tensors) must be copied from the base HF model (`Qwen/Qwen3.6-35B-A3B`). Only 2 safetensor shards needed (model-00025, model-00026).
+
+9. **Q8_K_P source.** Unlike Qwen3.5 which had a bf16 GGUF, HauhauCS only publishes quantized GGUFs. Use `gguf.quants.dequantize()` which handles Q8_K → F32 and auto-reverses shapes.
+
+### Pipeline
+
+Two stages (no stitch step needed):
+
+```
+Q8_K_P GGUF + mmproj GGUF + Reference HF (config/tokenizer/MTP)
+  | step1_convert_qwen36_moe.py
+  v
+HuggingFace Safetensors (bf16, text + vision + MTP, ~72GB)
+  | step2_quantize_qwen36_moe.py        (conservative: linear_attn bf16)
+  | step2b_quantize_qwen36_aggressive.py (aggressive: everything NVFP4)
+  v
+Final NVFP4 Model (~21-22GB, ready for vLLM)
+```
+
+No step3 needed because `Qwen3_5MoeForConditionalGeneration` loads the full multimodal model directly, and the quantization ignore list keeps vision weights in bf16.
+
+### Two Quantization Profiles
+
+**Conservative** (`step2_quantize_qwen36_moe.py`): Follows AEON-7/RedHatAI approach. Keeps linear_attn (DeltaNet) and MTP in bf16 for quality.
+
+```python
+ignore=["lm_head", "re:.*visual.*", "re:.*mlp.gate$",
+        "re:.*mlp.shared_expert_gate$", "re:.*linear_attn.*", "re:^mtp.*"]
+```
+
+**Aggressive** (`step2b_quantize_qwen36_aggressive.py`): Follows sakamakismile approach. Quantizes everything except lm_head, vision, and gates. Smaller footprint for longer context.
+
+```python
+ignore=["lm_head", "re:.*visual.*", "re:.*mlp.gate$", "re:.*mlp.shared_expert_gate$"]
+```
+
+| Profile | Size | RTX 5090 text-only ctx | With vision |
+|---------|------|----------------------|-------------|
+| Conservative | ~22 GB | ~131K | ~4K |
+| Aggressive | ~21 GB | ~131K+ | ~65K |
+
+### Quick Start
+
+```bash
+# 1. Download GGUF source
+hf download HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive \
+  --include "*Q8_K_P*" "*mmproj*" --local-dir ./src
+
+# 2. Download reference config/tokenizer + MTP shards
+hf download Qwen/Qwen3.6-35B-A3B \
+  config.json tokenizer.json tokenizer_config.json chat_template.jinja \
+  merges.txt vocab.json generation_config.json preprocessor_config.json \
+  video_preprocessor_config.json model.safetensors.index.json \
+  model-00025-of-00026.safetensors model-00026-of-00026.safetensors \
+  --local-dir ./ref
+
+# 3. Convert GGUF to HF safetensors
+python scripts/step1_convert_qwen36_moe.py \
+  --gguf-llm ./src/*Q8_K_P*.gguf \
+  --gguf-vision ./src/*mmproj*.gguf \
+  --output-dir ./qwen36-bf16-hf \
+  --reference-repo Qwen/Qwen3.6-35B-A3B
+
+# 4a. Conservative NVFP4 (linear_attn + MTP stay bf16)
+python scripts/step2_quantize_qwen36_moe.py \
+  --model-dir ./qwen36-bf16-hf \
+  --output-dir ./qwen36-nvfp4-conservative
+
+# 4b. OR Aggressive NVFP4 (everything quantized, best for long context)
+python scripts/step2b_quantize_qwen36_aggressive.py \
+  --model-dir ./qwen36-bf16-hf \
+  --output-dir ./qwen36-nvfp4-aggressive
+```
+
+### 60GB RAM Workaround
+
+The 67GB bf16 model exceeds typical 64GB system RAM. The step2 scripts use `device_map="auto"` with disk offloading, which requires two patches to work around a transformers/llmcompressor save bug with MoE models:
+
+1. **transformers/integrations/accelerate.py** (`load_offloaded_parameter`): Add `try/except AttributeError: continue` around `model.get_submodule()` to skip non-matching paths.
+2. **llmcompressor compressed_tensors_utils.py** (`save_pretrained_wrapper`): Comment out `to_accelerate(model)` and `from_accelerate(model)` to prevent tensor name prefix triplication.
+3. **Post-save key rename**: The saved safetensors will have triple `model.language_model.language_model.language_model.` prefix. Fix with:
+   ```python
+   new_key = key.replace('model.language_model.language_model.language_model.', 'model.language_model.')
+   ```
+
+These patches are not needed if your system has 128GB+ RAM (load without `device_map`).
+
+### vLLM Deployment
+
+```bash
+# Text-only, 100K+ context on RTX 5090
+docker run --gpus all -v ./qwen36-nvfp4:/model vllm/vllm-openai:nightly \
+  --model /model \
+  --quantization compressed-tensors \
+  --kv-cache-dtype fp8 \
+  --gpu-memory-utilization 0.95 \
+  --max-model-len 100000 \
+  --max-num-seqs 1 \
+  --reasoning-parser qwen3 \
+  --language-model-only
+
+# With MTP speculative decoding (when supported)
+# --speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":2}'
+```
+
+AEON-7 recommends `VLLM_TEST_FORCE_FP8_MARLIN=1` if CUTLASS NVFP4 is broken on your SM121 GPU.
+
 ## Gemma 4 E4B Variant
 
 A separate entry-point supports **Gemma 4 E4B** multimodal models (text + vision + audio). This targets e.g. HauhauCS's `Gemma-4-E4B-Uncensored-*-Aggressive` series and any other Gemma 4 E4B finetune published only as GGUF.
@@ -316,7 +466,9 @@ The code in this repository is MIT licensed. Model weights are subject to their 
 
 ## Acknowledgments
 
-- [HauhauCS](https://huggingface.co/HauhauCS) for the uncensored Qwen3.5-27B and Gemma 4 E4B models
+- [HauhauCS](https://huggingface.co/HauhauCS) for the uncensored Qwen3.5-27B, Qwen3.6-35B-A3B, and Gemma 4 E4B models
+- [sakamakismile](https://huggingface.co/sakamakismile) for the Qwen3.6 NVFP4 quantization recipe reference
+- [AEON-7](https://huggingface.co/AEON-7) for Qwen3.6 NVFP4 conservative quantization insights
 - [Kbenkhaled](https://huggingface.co/Kbenkhaled/Qwen3.5-27B-NVFP4) for the NVFP4 quantization recipe
 - [huihui-ai](https://huggingface.co/huihui-ai) for the HF-format Gemma 4 E4B reference used by the Gemma 4 pipeline
 - [Neural Magic / llm-compressor](https://github.com/neuralmagic/llm-compressor) for the quantization framework
