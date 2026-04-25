@@ -1,6 +1,6 @@
-# GGUF → NVFP4: Convert Qwen3.5, Qwen3.6‑MoE (A3B) & Gemma 4 E4B for vLLM
+# GGUF → NVFP4: Convert Qwen3.5, Qwen3.6 Dense/MoE & Gemma 4 E4B for vLLM
 
-> A production pipeline that converts **GGUF** checkpoints of hybrid‑attention and MoE models into **NVIDIA NVFP4** quantized HuggingFace safetensors — ready to serve with **vLLM** on a single **RTX 5090**. Targets models `transformers` cannot load from GGUF directly (Qwen3.5, Qwen3.6‑MoE, Gemma 4).
+> A production pipeline that converts **GGUF** checkpoints of hybrid‑attention, dense, and MoE models into **NVIDIA NVFP4** quantized HuggingFace safetensors — ready to serve with **vLLM** on a single **RTX 5090**. Targets models `transformers` cannot load from GGUF directly (Qwen3.5, Qwen3.6 dense/MoE, Gemma 4).
 
 <p align="center">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-green.svg">
@@ -17,18 +17,19 @@
 
 ## TL;DR
 
-`transformers` cannot load Qwen3.5 (hybrid Gated‑DeltaNet), Qwen3.6‑MoE (A3B, with MTP head), or Gemma 4 (GQA + PLE) directly from GGUF. This repo provides **model‑specific GGUF → HF → NVFP4** pipelines that extract tensors, fix the known conversion pitfalls, quantize to NVFP4 with `llm-compressor`, and emit a vLLM‑ready multimodal checkpoint.
+`transformers` cannot load Qwen3.5 (hybrid Gated‑DeltaNet), Qwen3.6 dense/MoE (with MTP and vision variants), or Gemma 4 (GQA + PLE) directly from GGUF. This repo provides **model‑specific GGUF → HF → NVFP4** pipelines that extract tensors, fix the known conversion pitfalls, quantize to NVFP4 with `llm-compressor`, and emit a vLLM‑ready multimodal checkpoint.
 
 ## Supported Models
 
 | Model | Architecture | Source format | Output (NVFP4) | Target GPU | Stages |
 |-------|-------------|---------------|----------------|------------|--------|
 | **Qwen3.5‑27B** | Hybrid Gated‑DeltaNet (3:1 linear ∶ full‑attn), text + vision | bf16 GGUF | ~18 GB + 0.9 GB vision | RTX 5090 (32 GB) | 3 (convert → quantize → stitch) |
+| **Qwen3.6‑27B Dense** | Hybrid Gated‑DeltaNet (3:1), dense FFN, text + vision + MTP | Q8_K_P GGUF + f16 mmproj | ~17–18 GB | RTX 5090 (32 GB) | 4 (convert → stitch MTP → quantize → pack) |
 | **Qwen3.6‑35B‑A3B MoE** | 256 experts (8 routed + 1 shared), hybrid DeltaNet, text + vision + MTP | Q8_K_P GGUF | ~21–22 GB | RTX 5090 (32 GB) | 2 (convert+MTP → quantize) |
 | **Gemma 4 E4B** | Standard GQA + Per‑Layer Embedding, text + vision + audio | Q8_K_P GGUF | ~5–6 GB | RTX 5090 / smaller | 2 (convert → NVFP4A16) |
 
 **Quick links:**
-[Qwen3.5‑27B](#qwen35-27b--nvfp4) · [Qwen3.6‑35B‑A3B MoE](#qwen36-35b-a3b-moe--nvfp4) · [Gemma 4 E4B](#gemma-4-e4b--nvfp4) · [vLLM deployment](#vllm-deployment) · [GitHub topics](#repository-metadata-for-maintainers)
+[Qwen3.5‑27B](#qwen35-27b--nvfp4) · [Qwen3.6‑27B Dense](#qwen36-27b-dense-hauhaucs--nvfp4) · [Qwen3.6‑35B‑A3B MoE](#qwen36-35b-a3b-moe--nvfp4) · [Gemma 4 E4B](#gemma-4-e4b--nvfp4) · [vLLM deployment](#vllm-deployment) · [GitHub topics](#repository-metadata-for-maintainers)
 
 ---
 
@@ -37,6 +38,8 @@
 **Qwen3.5** uses a hybrid Gated‑DeltaNet architecture that interleaves Mamba‑style linear attention with full softmax attention at a 3:1 ratio. As of writing, `transformers` does not support loading Qwen3.5 from GGUF format directly. This repo manually extracts tensors from GGUF, applies the required transformations, quantizes to NVFP4, and produces a model ready for vLLM.
 
 **Qwen3.6‑35B‑A3B** adds Mixture‑of‑Experts on top of the same hybrid attention and carries an additional MTP (Multi‑Token Prediction) head for speculative decoding. Many community finetunes (e.g. HauhauCS uncensored) publish only quantized GGUFs — no native bf16 safetensors.
+
+**Qwen3.6‑27B Dense** keeps the Qwen3.5-style dense FFN and 64-layer hybrid attention, but uses Qwen3.6 tokenizer/config/vision/MTP metadata. The HauhauCS release is GGUF-only, so the reproducible path is GGUF dequantization plus official `Qwen/Qwen3.6-27B` reference tensors for MTP.
 
 **Gemma 4 E4B** has the same GGUF‑loader gap: `transformers` supports `gemma2`/`gemma3` from GGUF but **not `gemma4`**. The HauhauCS uncensored series is published only as GGUF, so the same `GGUF → HF → NVFP4` path applies.
 
@@ -195,6 +198,106 @@ Linear‑attention layers use:
 | **Total** | **~30 GB** |
 
 Use `gpu_memory_utilization=0.90` and `kv_cache_dtype=fp8` for comfortable operation.
+
+---
+
+## Qwen3.6‑27B Dense (HauhauCS) → NVFP4
+
+This path reproduces the published model
+[`lyf/Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-NVFP4`](https://huggingface.co/lyf/Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-NVFP4)
+from the GGUF-only HauhauCS source
+[`HauhauCS/Qwen3.6-27B-Uncensored-HauhauCS-Aggressive`](https://huggingface.co/HauhauCS/Qwen3.6-27B-Uncensored-HauhauCS-Aggressive).
+
+### Dense 27B Differences from Qwen3.6 MoE
+
+- Dense FFN: uses `Qwen3_5ForConditionalGeneration`, not `Qwen3_5MoeForConditionalGeneration`.
+- 64 transformer layers, with full-attention layers at `3, 7, 11, ...`.
+- Linear-attention value heads use the Qwen3.5-style `(3,16)` permutation and `V_SIZE=6144`.
+- MTP tensors are not present in the HauhauCS GGUF and must be stitched from official `Qwen/Qwen3.6-27B`.
+- Vision remains FP16/BF16; it is copied/packed as an extra shard and is not routed into NVFP4 kernels.
+
+### Pipeline
+
+```
+Q8_K_P GGUF + f16 mmproj
+  │  step1_convert_qwen36_dense.py
+  ▼
+HF safetensors (text + vision, BF16/FP16)
+  │  stitch_qwen36_mtp.py
+  ▼
+HF safetensors (text + vision + MTP)
+  │  step2_quantize_qwen36_dense.py
+  ▼
+llm-compressor NVFP4 output
+  │  step3_pack_qwen36_dense.py
+  ▼
+Published full checkpoint (NVFP4 text + BF16 MTP/vision)
+```
+
+### Quick Start
+
+```bash
+# 1. Download HauhauCS GGUF source
+hf download HauhauCS/Qwen3.6-27B-Uncensored-HauhauCS-Aggressive \
+  Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf \
+  mmproj-Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-f16.gguf \
+  --local-dir ./src/qwen36-27b-hauhau
+
+# 2. Download official MTP shards/index from Qwen/Qwen3.6-27B
+hf download Qwen/Qwen3.6-27B \
+  model.safetensors.index.json \
+  model-00013-of-00015.safetensors model-00015-of-00015.safetensors \
+  --local-dir ./ref/qwen36-27b-official
+
+# 3. Convert GGUF text + mmproj into HF safetensors
+python scripts/step1_convert_qwen36_dense.py \
+  --gguf-text ./src/qwen36-27b-hauhau/Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf \
+  --gguf-vision ./src/qwen36-27b-hauhau/mmproj-Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-f16.gguf \
+  --output-dir ./work/qwen36-27b-hauhau-hf \
+  --reference-repo Qwen/Qwen3.6-27B
+
+# 4. Add MTP tensors from the official dense model
+python scripts/stitch_qwen36_mtp.py \
+  --source-dir ./ref/qwen36-27b-official \
+  --target-dir ./work/qwen36-27b-hauhau-hf
+
+# 5. Quantize text weights to NVFP4
+python scripts/step2_quantize_qwen36_dense.py \
+  --model-dir ./work/qwen36-27b-hauhau-hf \
+  --output-dir ./work/qwen36-27b-hauhau-nvfp4 \
+  --num-samples 256 \
+  --dataset-mode ultrachat_nemotron
+
+# 6. Repack visual + MTP tensors into one multimodal extra shard
+python scripts/step3_pack_qwen36_dense.py \
+  --source-dir ./work/qwen36-27b-hauhau-hf \
+  --nvfp4-dir ./work/qwen36-27b-hauhau-nvfp4
+```
+
+### Runtime Notes
+
+- On RTX 5090 with `vllm/vllm-openai:cu130-nightly`, `VLLM_NVFP4_GEMM_BACKEND=marlin` is validated and was about 34–36% faster than `flashinfer-cutlass` on the local 1024-token Responses benchmark.
+- If Marlin fails with `size_n = 96 is not divisible by tile_n_size = 64`, check that visual tensors and non-64-aligned linear-attention projections were not quantized into NVFP4.
+- For 128K agentic serving, use `--language-model-only`, `--kv-cache-dtype fp8`, `--max-num-seqs 1`, and a custom chat template if `/v1/responses` must default to non-thinking output.
+- MTP startup works, but measured acceptance was workload-sensitive; do not assume MTP improves throughput without benchmarking your prompt mix.
+
+### Runtime View Builder
+
+The packed checkpoint can be materialized into profile-specific runtime views:
+
+```bash
+python scripts/build_qwen36_runtime_view.py \
+  --source-dir ./work/qwen36-27b-hauhau-nvfp4 \
+  --output-dir ./runtime/qwen36-27b-full \
+  --profile full
+
+python scripts/build_qwen36_runtime_view.py \
+  --source-dir ./work/qwen36-27b-hauhau-nvfp4 \
+  --output-dir ./runtime/qwen36-27b-text \
+  --profile text
+```
+
+Use `profile=text` for maximum context space, `profile=full` for vision-capable runtime loading, and `profile=no-vision` / `profile=no-mtp` when you want one side of the extra shard only.
 
 ---
 

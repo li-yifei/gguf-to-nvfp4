@@ -1,6 +1,6 @@
-# GGUF → NVFP4：Qwen3.5 / Qwen3.6‑MoE (A3B) / Gemma 4 E4B 量化部署（vLLM 可用）
+# GGUF → NVFP4：Qwen3.5 / Qwen3.6 稠密与 MoE / Gemma 4 E4B 量化部署（vLLM 可用）
 
-> 一套生产可用的 **GGUF → NVIDIA NVFP4** 量化转换管线，把 `transformers` 无法从 GGUF 直接加载的混合注意力 / MoE 模型（Qwen3.5、Qwen3.6‑MoE、Gemma 4）转成 HuggingFace safetensors，单卡 **RTX 5090** 即可用 **vLLM** 部署。
+> 一套生产可用的 **GGUF → NVIDIA NVFP4** 量化转换管线，把 `transformers` 无法从 GGUF 直接加载的混合注意力 / 稠密 / MoE 模型（Qwen3.5、Qwen3.6 稠密与 MoE、Gemma 4）转成 HuggingFace safetensors，单卡 **RTX 5090** 即可用 **vLLM** 部署。
 
 <p align="center">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-green.svg">
@@ -17,18 +17,19 @@
 
 ## TL;DR
 
-`transformers` 目前**不支持**直接从 GGUF 加载 Qwen3.5（混合 Gated‑DeltaNet）、Qwen3.6‑MoE（A3B，带 MTP 头）和 Gemma 4（GQA + PLE）。本仓库提供**按模型定制**的 GGUF → HF → NVFP4 管线：从 GGUF 提取张量、修复已知转换坑、用 `llm-compressor` 量化到 NVFP4，产出可直接喂给 vLLM 的多模态 checkpoint。
+`transformers` 目前**不支持**直接从 GGUF 加载 Qwen3.5（混合 Gated‑DeltaNet）、Qwen3.6 稠密 / MoE（带 MTP 和视觉变体）和 Gemma 4（GQA + PLE）。本仓库提供**按模型定制**的 GGUF → HF → NVFP4 管线：从 GGUF 提取张量、修复已知转换坑、用 `llm-compressor` 量化到 NVFP4，产出可直接喂给 vLLM 的多模态 checkpoint。
 
 ## 支持的模型
 
 | 模型 | 架构 | 源格式 | NVFP4 产出 | 目标 GPU | 阶段数 |
 |------|------|--------|-----------|---------|--------|
 | **Qwen3.5‑27B** | 混合 Gated‑DeltaNet（线性∶全注意力 = 3∶1），文本 + 视觉 | bf16 GGUF | ~18 GB + 0.9 GB 视觉 | RTX 5090 (32GB) | 3（convert → quantize → stitch） |
+| **Qwen3.6‑27B 稠密** | 混合 Gated‑DeltaNet（3∶1），稠密 FFN，文本 + 视觉 + MTP | Q8_K_P GGUF + f16 mmproj | ~17–18 GB | RTX 5090 (32GB) | 4（convert → stitch MTP → quantize → pack） |
 | **Qwen3.6‑35B‑A3B MoE** | 256 专家（8 路由 + 1 共享），混合 DeltaNet，文本 + 视觉 + MTP | Q8_K_P GGUF | ~21–22 GB | RTX 5090 (32GB) | 2（convert+MTP → quantize） |
 | **Gemma 4 E4B** | 标准 GQA + 每层 embedding (PLE)，文本 + 视觉 + 音频 | Q8_K_P GGUF | ~5–6 GB | RTX 5090 / 更低 | 2（convert → NVFP4A16） |
 
 **快速跳转：**
-[Qwen3.5‑27B](#qwen35-27b--nvfp4) · [Qwen3.6‑35B‑A3B MoE](#qwen36-35b-a3b-moe--nvfp4) · [Gemma 4 E4B](#gemma-4-e4b--nvfp4) · [vLLM 部署](#vllm-部署) · [GitHub topics](#仓库元信息供维护者使用)
+[Qwen3.5‑27B](#qwen35-27b--nvfp4) · [Qwen3.6‑27B 稠密](#qwen36-27b-稠密hauhaucs--nvfp4) · [Qwen3.6‑35B‑A3B MoE](#qwen36-35b-a3b-moe--nvfp4) · [Gemma 4 E4B](#gemma-4-e4b--nvfp4) · [vLLM 部署](#vllm-部署) · [GitHub topics](#仓库元信息供维护者使用)
 
 ---
 
@@ -37,6 +38,8 @@
 **Qwen3.5** 采用混合 Gated‑DeltaNet 架构，以 3∶1 的比例交替使用 Mamba 风格线性注意力和全 softmax 注意力。目前 `transformers` 不支持直接从 GGUF 加载 Qwen3.5。本仓库从 GGUF 手动提取张量，完成必要的格式转换，量化为 NVFP4，最终产出 vLLM 可部署模型。
 
 **Qwen3.6‑35B‑A3B** 在同样的混合注意力之上引入 Mixture‑of‑Experts，并多了一颗 MTP（Multi‑Token Prediction，多 token 预测）头用于投机解码。社区微调（如 HauhauCS uncensored）普遍只发布量化 GGUF，没有 bf16 原生 safetensors。
+
+**Qwen3.6‑27B 稠密版** 保留 Qwen3.5 风格的稠密 FFN 和 64 层混合注意力，但使用 Qwen3.6 的 tokenizer/config/vision/MTP 元数据。HauhauCS 版本只发布 GGUF，所以可复现路径是 GGUF 解量化，再从官方 `Qwen/Qwen3.6-27B` 补 MTP 权重。
 
 **Gemma 4 E4B** 有同样的加载缺口：`transformers` 支持 `gemma2` / `gemma3` 从 GGUF 加载，但**不支持** `gemma4`。HauhauCS 的 uncensored 系列只发布 GGUF，所以同样需要 `GGUF → HF → NVFP4` 路径。
 
@@ -195,6 +198,106 @@ python scripts/step3_stitch_vision.py \
 | **总计** | **~30 GB** |
 
 建议使用 `gpu_memory_utilization=0.90` 配合 `kv_cache_dtype=fp8`。
+
+---
+
+## Qwen3.6‑27B 稠密（HauhauCS）→ NVFP4
+
+这一流程对应已发布模型
+[`lyf/Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-NVFP4`](https://huggingface.co/lyf/Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-NVFP4)，
+源模型是 GGUF-only 的
+[`HauhauCS/Qwen3.6-27B-Uncensored-HauhauCS-Aggressive`](https://huggingface.co/HauhauCS/Qwen3.6-27B-Uncensored-HauhauCS-Aggressive)。
+
+### 和 Qwen3.6 MoE 的关键差异
+
+- 稠密 FFN：使用 `Qwen3_5ForConditionalGeneration`，不是 `Qwen3_5MoeForConditionalGeneration`。
+- 64 层 transformer，全注意力层为 `3, 7, 11, ...`。
+- 线性注意力 value heads 仍使用 Qwen3.5 风格 `(3,16)` 重排，`V_SIZE=6144`。
+- MTP 张量不在 HauhauCS GGUF 内，需要从官方 `Qwen/Qwen3.6-27B` 拼接。
+- 视觉塔保持 FP16/BF16，作为 extra shard 打包，不进入 NVFP4 kernel。
+
+### 流程
+
+```
+Q8_K_P GGUF + f16 mmproj
+  │  step1_convert_qwen36_dense.py
+  ▼
+HF safetensors（文本 + 视觉，BF16/FP16）
+  │  stitch_qwen36_mtp.py
+  ▼
+HF safetensors（文本 + 视觉 + MTP）
+  │  step2_quantize_qwen36_dense.py
+  ▼
+llm-compressor NVFP4 输出
+  │  step3_pack_qwen36_dense.py
+  ▼
+最终完整 checkpoint（NVFP4 文本 + BF16 MTP/视觉）
+```
+
+### 快速上手
+
+```bash
+# 1. 下载 HauhauCS GGUF 源
+hf download HauhauCS/Qwen3.6-27B-Uncensored-HauhauCS-Aggressive \
+  Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf \
+  mmproj-Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-f16.gguf \
+  --local-dir ./src/qwen36-27b-hauhau
+
+# 2. 下载官方 MTP 所在分片和 index
+hf download Qwen/Qwen3.6-27B \
+  model.safetensors.index.json \
+  model-00013-of-00015.safetensors model-00015-of-00015.safetensors \
+  --local-dir ./ref/qwen36-27b-official
+
+# 3. 转换 GGUF 文本 + mmproj 为 HF safetensors
+python scripts/step1_convert_qwen36_dense.py \
+  --gguf-text ./src/qwen36-27b-hauhau/Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf \
+  --gguf-vision ./src/qwen36-27b-hauhau/mmproj-Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-f16.gguf \
+  --output-dir ./work/qwen36-27b-hauhau-hf \
+  --reference-repo Qwen/Qwen3.6-27B
+
+# 4. 从官方稠密模型拼接 MTP 张量
+python scripts/stitch_qwen36_mtp.py \
+  --source-dir ./ref/qwen36-27b-official \
+  --target-dir ./work/qwen36-27b-hauhau-hf
+
+# 5. 文本权重量化到 NVFP4
+python scripts/step2_quantize_qwen36_dense.py \
+  --model-dir ./work/qwen36-27b-hauhau-hf \
+  --output-dir ./work/qwen36-27b-hauhau-nvfp4 \
+  --num-samples 256 \
+  --dataset-mode ultrachat_nemotron
+
+# 6. 把视觉 + MTP 重新打包成多模态 extra shard
+python scripts/step3_pack_qwen36_dense.py \
+  --source-dir ./work/qwen36-27b-hauhau-hf \
+  --nvfp4-dir ./work/qwen36-27b-hauhau-nvfp4
+```
+
+### 运行时注意事项
+
+- RTX 5090 + `vllm/vllm-openai:cu130-nightly` 下，`VLLM_NVFP4_GEMM_BACKEND=marlin` 已验证；本机 1024-token Responses benchmark 比 `flashinfer-cutlass` 快约 34–36%。
+- 如果 Marlin 报 `size_n = 96 is not divisible by tile_n_size = 64`，先检查视觉张量和非 64 对齐的线性注意力投影有没有被误量化进 NVFP4。
+- 128K agentic 服务建议用 `--language-model-only`、`--kv-cache-dtype fp8`、`--max-num-seqs 1`；如果 `/v1/responses` 默认必须不思考，需要配自定义 chat template。
+- MTP 启动已验证，但接受率和 prompt mix 强相关；不要不测就假设 MTP 一定提速。
+
+### Runtime View Builder
+
+完整 checkpoint 可以按运行 profile 生成 runtime view：
+
+```bash
+python scripts/build_qwen36_runtime_view.py \
+  --source-dir ./work/qwen36-27b-hauhau-nvfp4 \
+  --output-dir ./runtime/qwen36-27b-full \
+  --profile full
+
+python scripts/build_qwen36_runtime_view.py \
+  --source-dir ./work/qwen36-27b-hauhau-nvfp4 \
+  --output-dir ./runtime/qwen36-27b-text \
+  --profile text
+```
+
+`profile=text` 用于最大化上下文空间，`profile=full` 用于视觉可用的完整加载；`profile=no-vision` / `profile=no-mtp` 可只保留 extra shard 中的一侧。
 
 ---
 
