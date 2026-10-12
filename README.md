@@ -15,6 +15,14 @@
 
 ---
 
+## Current workflow update (2026-10-12)
+
+**Qwen3.8-27B native BF16 → ModelOpt NVFP4 → compressed-tensors** is now documented
+alongside the GGUF pipelines. See the [workflow, scripts and validation boundaries](docs/qwen38.md).
+It preserves same-source BF16 MTP/vision tensors and includes a CPU-only checkpoint
+audit plus the historical 4k vLLM smoke profile. Local weights and historical images
+are currently absent; archived runtime results are not a fresh validation.
+
 ## TL;DR
 
 `transformers` cannot load Qwen3.5 (hybrid Gated‑DeltaNet), Qwen3.6 dense/MoE (with MTP and vision variants), or Gemma 4 (GQA + PLE) directly from GGUF. This repo provides **model‑specific GGUF → HF → NVFP4** pipelines that extract tensors, fix the known conversion pitfalls, quantize to NVFP4 with `llm-compressor`, and emit a vLLM‑ready multimodal checkpoint.

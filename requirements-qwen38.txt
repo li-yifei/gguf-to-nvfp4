@@ -1,0 +1,11 @@
+# Separate ModelOpt route; historical package versions were not fully captured.
+# Use an isolated environment and a mutually compatible Qwen3.8-capable stack.
+# These are dependencies, NOT a reproducible version lock.
+torch
+transformers
+accelerate
+nvidia-modelopt
+compressed-tensors
+safetensors
+datasets
+huggingface-hub

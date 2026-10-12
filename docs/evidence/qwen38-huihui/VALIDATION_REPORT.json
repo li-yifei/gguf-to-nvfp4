@@ -1,0 +1,41 @@
+{
+  "source_repo": "huihui-ai/Huihui-Qwen3.8-27B-abliterated",
+  "source_revision": "d42ca8978c5a66e92c3446d46e8adfe03ef692ff",
+  "artifact_format": "compressed-tensors nvfp4-pack-quantized",
+  "checkpoint": {
+    "source_repo": "huihui-ai/Huihui-Qwen3.8-27B-abliterated",
+    "source_revision": "d42ca8978c5a66e92c3446d46e8adfe03ef692ff",
+    "format": "nvfp4-pack-quantized",
+    "quant_method": "compressed-tensors",
+    "tensor_count": 2687,
+    "vision_tensor_count": 333,
+    "mtp_tensor_count": 15,
+    "shard_count": 3,
+    "index_missing_files": 0,
+    "calibration": {
+      "dataset": "abisee/cnn_dailymail",
+      "config": "3.0.0",
+      "samples": 20,
+      "sequence_length": 8192
+    }
+  },
+  "runtime": {
+    "gpu": "RTX 5090 32GB",
+    "power_limit_w": 450,
+    "vllm_image": "vllm/vllm-openai:qwen38-x86_64-cu130"
+  },
+  "tests": {
+    "health": "passed",
+    "models": "passed",
+    "text_1024": "passed",
+    "mtp_n3": {
+      "status": "passed",
+      "draft_tokens": 1362,
+      "accepted_tokens": 572,
+      "acceptance_percent": 42.0,
+      "mean_acceptance_length": 2.33,
+      "per_position": "0.602/0.429/0.295",
+      "client_elapsed_seconds": 10.73
+    }
+  }
+}

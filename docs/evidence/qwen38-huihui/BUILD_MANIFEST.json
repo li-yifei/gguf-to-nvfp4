@@ -1,0 +1,23 @@
+{
+  "repo_id": "lyf/Qwen3.8-27B-Huihui-Abliterated-NVFP4-MTP-VL",
+  "created_utc": "2026-08-19",
+  "source": {
+    "repo": "huihui-ai/Huihui-Qwen3.8-27B-abliterated",
+    "revision": "d42ca8978c5a66e92c3446d46e8adfe03ef692ff"
+  },
+  "official_base": {
+    "repo": "Qwen/Qwen3.8-27B"
+  },
+  "quantization": {
+    "scheme": "NVFP4 W4A4",
+    "format": "compressed-tensors nvfp4-pack-quantized",
+    "calibration_dataset": "abisee/cnn_dailymail 3.0.0",
+    "calibration_samples": 20,
+    "sequence_length": 8192
+  },
+  "validation": {
+    "gpu": "RTX 5090 32GB",
+    "power_limit_w": 450,
+    "runtime": "vllm/vllm-openai:qwen38-x86_64-cu130"
+  }
+}

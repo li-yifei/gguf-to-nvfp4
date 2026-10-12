@@ -15,6 +15,14 @@
 
 ---
 
+## 近期流程更新（2026-10-12）
+
+已补充 **Qwen3.8-27B 原生 BF16 → ModelOpt NVFP4 → compressed-tensors** 流程、
+同源 MTP 恢复、静态检查脚本及历史 4k vLLM smoke 配置。
+详见[流程、历史证据与当前验证边界](docs/qwen38.md)。这条路线不经过 GGUF。
+当前本地权重分片和历史镜像缺失；历史文本/MTP 成功记录不代表本次重新验证，
+也不代表图像/视频或 200k 上下文已经验证。
+
 ## TL;DR
 
 `transformers` 目前**不支持**直接从 GGUF 加载 Qwen3.5（混合 Gated‑DeltaNet）、Qwen3.6 稠密 / MoE（带 MTP 和视觉变体）和 Gemma 4（GQA + PLE）。本仓库提供**按模型定制**的 GGUF → HF → NVFP4 管线：从 GGUF 提取张量、修复已知转换坑、用 `llm-compressor` 量化到 NVFP4，产出可直接喂给 vLLM 的多模态 checkpoint。
